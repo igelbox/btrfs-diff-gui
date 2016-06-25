@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+
+import subprocess
+import re
+from tkinter import Tk, ttk
+import os
+import bisect
+import time
+import argparse
+
+
+def run_findnew(path, start):
+    cr = subprocess.run(
+        ['btrfs', 'subvolume', 'find-new', path, str(start)],
+        stdout=subprocess.PIPE, check=True, universal_newlines=True
+    )
+    return cr.stdout
+
+
+def compare_subvolumes(old, new, callback):
+    rbase = run_findnew(old, 999999999)
+    re_base = re.compile('transid marker was (\d+)')
+    tid_base = int(re_base.search(rbase).group(1))
+
+    rdiff = run_findnew(new, tid_base)
+    re_diff = re.compile(' flags \S+ (.*)$')
+    for l in rdiff.splitlines():
+        rm_diff = re_diff.search(l)
+        if rm_diff is None:
+            if re_base.search(l):
+                continue
+        callback(rm_diff.group(1))
+
+
+def xstat(fpath):
+    if not os.path.exists(fpath):
+        return ''
+    st = os.stat(fpath)
+    return time.strftime('%Y.%m.%d %H:%M', time.localtime(st.st_mtime))
+
+
+class TreeNodeBuilder:
+    def __init__(self, tree, id, fpath = ''):
+        self._tree = tree
+        self._id = id
+        self._fpath = fpath
+        self._childnames = []
+        self._childvalues = []
+
+    def sub(self, name, cx):
+        i = bisect.bisect_left(self._childnames, name)
+        if (i == len(self._childnames)) or (self._childnames[i] != name):
+            fpath = os.path.join(self._fpath, name)
+            nid = self._tree.insert(self._id, i, text=name, values=(
+                xstat(os.path.join(cx[0], fpath)),
+                xstat(os.path.join(cx[1], fpath)),
+            ))
+            self._childnames.insert(i, name)
+            self._childvalues.insert(i, TreeNodeBuilder(self._tree, nid, fpath))
+        return self._childvalues[i]
+
+
+def build_tree(tree, old, new):
+    builder = TreeNodeBuilder(tree, '')
+    cx = (old, new)
+
+    def create_node(fpath):
+        nonlocal builder, cx
+        b = builder
+        for pe in fpath.split(os.sep):
+            b = b.sub(pe, cx)
+
+    compare_subvolumes(old, new, create_node)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Compares two btrfs snapshots')
+    parser.add_argument('old-subvolume', help='oldest snapshot filepath')
+    parser.add_argument('new-subvolume', help='newest snapshot filepath')
+    args = parser.parse_args()
+
+    root = Tk()
+    root.title('btrfs-diff-gui')
+
+    tree = ttk.Treeview(root)
+
+    tree["columns"] = ("old", "new")
+    tree.column("old", width=100)
+    tree.column("new", width=100)
+    tree.heading("#0", text="Path")
+    tree.heading("old", text="Old")
+    tree.heading("new", text="New")
+
+    build_tree(
+        tree,
+        getattr(args, 'old-subvolume'),
+        getattr(args, 'new-subvolume'),
+    )
+
+    tree.pack(fill='both', expand=True)
+    root.mainloop()
+
+
+main()
