@@ -7,6 +7,7 @@ import os
 import bisect
 import time
 import argparse
+import filecmp
 
 
 def run_findnew(path, start):
@@ -32,10 +33,13 @@ def compare_subvolumes(old, new, callback):
         callback(rm_diff.group(1))
 
 
-def xstat(fpath):
-    if not os.path.exists(fpath):
+def try_stat(fpath):
+    return os.stat(fpath) if os.path.exists(fpath) else None
+
+
+def fmt_mtime(st):
+    if st is None:
         return ''
-    st = os.stat(fpath)
     return time.strftime('%Y.%m.%d %H:%M', time.localtime(st.st_mtime))
 
 
@@ -47,28 +51,36 @@ class TreeNodeBuilder:
         self._childnames = []
         self._childvalues = []
 
-    def sub(self, name, cx):
+    def sub(self, name, stats):
         i = bisect.bisect_left(self._childnames, name)
         if (i == len(self._childnames)) or (self._childnames[i] != name):
             fpath = os.path.join(self._fpath, name)
             nid = self._tree.insert(self._id, i, text=name, values=(
-                xstat(os.path.join(cx[0], fpath)),
-                xstat(os.path.join(cx[1], fpath)),
+                fmt_mtime(stats[0]),
+                fmt_mtime(stats[1]),
             ))
             self._childnames.insert(i, name)
             self._childvalues.insert(i, TreeNodeBuilder(self._tree, nid, fpath))
         return self._childvalues[i]
 
 
-def build_tree(tree, old, new):
+def build_tree(tree, old, new, verbose, hide_equal):
     builder = TreeNodeBuilder(tree, '')
-    cx = (old, new)
 
     def create_node(fpath):
-        nonlocal builder, cx
+        nonlocal builder
+        fp_o = os.path.join(old, fpath)
+        fp_n = os.path.join(new, fpath)
+        st_o, st_n = try_stat(fp_o), try_stat(fp_n)
+        if hide_equal and st_o and st_n:
+            if st_o.st_size == st_n.st_size:
+                if filecmp.cmp(fp_o, fp_n, shallow=False):
+                    if verbose:
+                        print('skip:', fpath)
+                    return
         b = builder
         for pe in fpath.split(os.sep):
-            b = b.sub(pe, cx)
+            b = b.sub(pe, (st_o, st_n))
 
     compare_subvolumes(old, new, create_node)
 
@@ -77,6 +89,11 @@ def main():
     parser = argparse.ArgumentParser(description='Compares two btrfs snapshots')
     parser.add_argument('old-subvolume', help='oldest snapshot filepath')
     parser.add_argument('new-subvolume', help='newest snapshot filepath')
+    parser.add_argument(
+        "--skip-equal", dest='skip-equal', action="store_true",
+        help="compare file contents and skip equal files"
+    )
+    parser.add_argument("--verbose", action="store_true", help="increase output verbosity")
     args = parser.parse_args()
 
     root = Tk()
@@ -95,6 +112,8 @@ def main():
         tree,
         getattr(args, 'old-subvolume'),
         getattr(args, 'new-subvolume'),
+        args.verbose,
+        getattr(args, 'skip-equal'),
     )
 
     tree.pack(fill='both', expand=True)
